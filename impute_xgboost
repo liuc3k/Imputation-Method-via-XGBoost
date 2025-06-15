@@ -1,52 +1,70 @@
-# Required libraries
 library(xgboost)
 library(dplyr)
-library(Matrix)
 
 impute_xgboost <- function(data, verbose = TRUE) {
   df <- data
   
-  # Drop columns with all NAs or >50% NAs
-  na_prop <- sapply(df, function(x) mean(is.na(x)))
-  drop_cols <- names(na_prop[na_prop >= 0.5])
-  if (length(drop_cols) > 0) {
-    if (verbose) {
-      message("Dropping columns with >50% missingness or all NA: ", paste(drop_cols, collapse = ", "))
+  if (verbose) cat("🧹 Preprocessing: Dropping problematic columns...\n")
+  drop_cols <- c()
+  
+  for (col in names(df)) {
+    col_vals <- df[[col]]
+    total_n <- length(col_vals)
+    na_n <- sum(is.na(col_vals))
+    non_na_vals <- na.omit(col_vals)
+    
+    if (na_n == total_n) {
+      if (verbose) cat("❌ Dropping", col, "- all NA\n")
+      drop_cols <- c(drop_cols, col)
+    } else if (length(unique(non_na_vals)) == 1 && na_n > 0) {
+      if (verbose) cat("❌ Dropping", col, "- only one unique non-NA value\n")
+      drop_cols <- c(drop_cols, col)
+    } else if ((na_n / total_n) > 0.5) {
+      if (verbose) cat("❌ Dropping", col, sprintf("- %.1f%% missing\n", 100 * na_n / total_n))
+      drop_cols <- c(drop_cols, col)
     }
-    df <- df[, !names(df) %in% drop_cols]
   }
   
-  # Loop over columns with missing values
+  df <- df[, !(names(df) %in% drop_cols)]
+  
+  factorize_column <- function(x, ref = NULL) {
+    x <- as.character(x)
+    all_levels <- if (is.null(ref)) unique(x[!is.na(x)]) else union(unique(x[!is.na(x)]), unique(ref[!is.na(ref)]))
+    as.integer(factor(x, levels = all_levels))
+  }
+  
   for (col in names(df)) {
     if (anyNA(df[[col]])) {
-      if (verbose) cat("\nImputing column:", col, "\n")
-      
-      # Define target and predictors
+      if (verbose) cat("\n🔧 Imputing:", col, "\n")
       target <- df[[col]]
       not_na_idx <- which(!is.na(target))
       na_idx <- which(is.na(target))
       
       y <- target[not_na_idx]
-      X <- df[not_na_idx, setdiff(names(df), col), drop = FALSE]
-      X_missing <- df[na_idx, setdiff(names(df), col), drop = FALSE]
+      X <- df[not_na_idx, setdiff(names(df), col)]
+      X_missing <- df[na_idx, setdiff(names(df), col)]
       
-      # Encode character/factor variables to numeric
+      # Convert categorical variables
       for (cname in names(X)) {
-        if (is.character(X[[cname]]) || is.factor(X[[cname]])) {
-          levels_union <- union(unique(X[[cname]]), unique(X_missing[[cname]]))
+        if (is.character(X[[cname]]) || is.factor(X[[cname]]) ||
+            is.character(X_missing[[cname]]) || is.factor(X_missing[[cname]])) {
+          levels_union <- unique(c(as.character(X[[cname]]), as.character(X_missing[[cname]])))
           X[[cname]] <- as.integer(factor(X[[cname]], levels = levels_union))
           X_missing[[cname]] <- as.integer(factor(X_missing[[cname]], levels = levels_union))
         }
       }
       
-      # Convert to matrix, check for full-NA rows
-      X_matrix <- as.matrix(X)
-      X_missing_matrix <- as.matrix(X_missing)
+      # Remove rows with NA in predictors
+      X <- na.omit(X)
+      y <- y[as.numeric(rownames(X))]
       
-      if (ncol(X_matrix) == 0 || ncol(X_missing_matrix) == 0) {
-        warning(paste("Skipping column", col, "- not enough non-missing predictors."))
+      if (length(y) == 0 || nrow(X) == 0 || nrow(X_missing) == 0) {
+        if (verbose) cat("⚠️ Skipping", col, "- insufficient data\n")
         next
       }
+      
+      X_matrix <- as.matrix(data.frame(lapply(X, as.numeric)))
+      X_missing_matrix <- as.matrix(data.frame(lapply(X_missing, as.numeric)))
       
       # Train and predict
       if (is.numeric(y)) {
@@ -70,14 +88,3 @@ impute_xgboost <- function(data, verbose = TRUE) {
   
   return(df)
 }
-
-df <- data.frame(
-  age = c(25, 30, NA, 45, 50),
-  income = c(NA, NA, 55000, NA, 70000),
-  gender = c("M", "F", "F", "M", NA),
-  hopeless = c(NA, NA, NA, NA, NA)
-)
-
-df$gender <- as.character(df$gender)
-df_imputed <- impute_xgboost(df)
-print(df_imputed)
