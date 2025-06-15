@@ -1,0 +1,83 @@
+# Required libraries
+library(xgboost)
+library(dplyr)
+library(Matrix)
+
+impute_xgboost <- function(data, verbose = TRUE) {
+  df <- data
+  
+  # Drop columns with all NAs or >50% NAs
+  na_prop <- sapply(df, function(x) mean(is.na(x)))
+  drop_cols <- names(na_prop[na_prop >= 0.5])
+  if (length(drop_cols) > 0) {
+    if (verbose) {
+      message("Dropping columns with >50% missingness or all NA: ", paste(drop_cols, collapse = ", "))
+    }
+    df <- df[, !names(df) %in% drop_cols]
+  }
+  
+  # Loop over columns with missing values
+  for (col in names(df)) {
+    if (anyNA(df[[col]])) {
+      if (verbose) cat("\nImputing column:", col, "\n")
+      
+      # Define target and predictors
+      target <- df[[col]]
+      not_na_idx <- which(!is.na(target))
+      na_idx <- which(is.na(target))
+      
+      y <- target[not_na_idx]
+      X <- df[not_na_idx, setdiff(names(df), col), drop = FALSE]
+      X_missing <- df[na_idx, setdiff(names(df), col), drop = FALSE]
+      
+      # Encode character/factor variables to numeric
+      for (cname in names(X)) {
+        if (is.character(X[[cname]]) || is.factor(X[[cname]])) {
+          levels_union <- union(unique(X[[cname]]), unique(X_missing[[cname]]))
+          X[[cname]] <- as.integer(factor(X[[cname]], levels = levels_union))
+          X_missing[[cname]] <- as.integer(factor(X_missing[[cname]], levels = levels_union))
+        }
+      }
+      
+      # Convert to matrix, check for full-NA rows
+      X_matrix <- as.matrix(X)
+      X_missing_matrix <- as.matrix(X_missing)
+      
+      if (ncol(X_matrix) == 0 || ncol(X_missing_matrix) == 0) {
+        warning(paste("Skipping column", col, "- not enough non-missing predictors."))
+        next
+      }
+      
+      # Train and predict
+      if (is.numeric(y)) {
+        model <- xgboost(data = X_matrix, label = y,
+                         objective = "reg:squarederror",
+                         nrounds = 50, verbose = 0)
+        preds <- predict(model, X_missing_matrix)
+      } else {
+        y <- as.factor(y)
+        model <- xgboost(data = X_matrix, label = as.numeric(y) - 1,
+                         objective = "multi:softmax",
+                         num_class = length(levels(y)),
+                         nrounds = 50, verbose = 0)
+        pred_idx <- predict(model, X_missing_matrix)
+        preds <- levels(y)[pred_idx + 1]
+      }
+      
+      df[[col]][na_idx] <- preds
+    }
+  }
+  
+  return(df)
+}
+
+df <- data.frame(
+  age = c(25, 30, NA, 45, 50),
+  income = c(NA, NA, 55000, NA, 70000),
+  gender = c("M", "F", "F", "M", NA),
+  hopeless = c(NA, NA, NA, NA, NA)
+)
+
+df$gender <- as.character(df$gender)
+df_imputed <- impute_xgboost(df)
+print(df_imputed)
